@@ -68,6 +68,13 @@ class Product {
   String get uniqueKey => '${platform}_${name}_$price';
 }
 
+class CartItem {
+  final Product product;
+  int quantity;
+
+  CartItem({required this.product, this.quantity = 1});
+}
+
 // ---------------------------------------------------------------------------
 // Platform visual config
 // ---------------------------------------------------------------------------
@@ -148,13 +155,15 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = false;
   String? _errorMessage;
 
-  // Cart state: platform name -> list of products
-  final Map<String, List<Product>> _cart = {};
+  // Cart state: platform name -> list of cart items
+  final Map<String, List<CartItem>> _cart = {};
 
   int get _cartItemCount {
     int count = 0;
     for (final items in _cart.values) {
-      count += items.length;
+      for (final item in items) {
+        count += item.quantity;
+      }
     }
     return count;
   }
@@ -303,14 +312,31 @@ class _HomeScreenState extends State<HomeScreen> {
   void _addToCart(Product product) {
     setState(() {
       _cart.putIfAbsent(product.platform, () => []);
-      // Prevent duplicates
-      final exists =
-          _cart[product.platform]!.any((p) => p.uniqueKey == product.uniqueKey);
-      if (!exists) {
-        _cart[product.platform]!.add(product);
+      final items = _cart[product.platform]!;
+      final index = items.indexWhere((p) => p.product.uniqueKey == product.uniqueKey);
+      
+      if (index == -1) {
+        items.add(CartItem(product: product, quantity: 1));
         _showSuccess('${product.name} added to cart!');
       } else {
-        _showError('${product.name} is already in your cart.');
+        items[index].quantity++;
+      }
+    });
+  }
+
+  void _updateCartQuantity(Product product, int delta) {
+    setState(() {
+      if (!_cart.containsKey(product.platform)) return;
+      final items = _cart[product.platform]!;
+      final index = items.indexWhere((p) => p.product.uniqueKey == product.uniqueKey);
+      if (index != -1) {
+        items[index].quantity += delta;
+        if (items[index].quantity <= 0) {
+          items.removeAt(index);
+          if (items.isEmpty) {
+            _cart.remove(product.platform);
+          }
+        }
       }
     });
   }
@@ -753,9 +779,10 @@ class _HomeScreenState extends State<HomeScreen> {
   // Widget: Individual Product Card (inside horizontal scroll)
   // ---------------------------------------------------------------------------
   Widget _buildProductCard(Product product, PlatformStyle style) {
-    final isInCart = _cart[product.platform]
-            ?.any((p) => p.uniqueKey == product.uniqueKey) ??
-        false;
+    final cartItems = _cart[product.platform] ?? [];
+    final cartItemIndex = cartItems.indexWhere((p) => p.product.uniqueKey == product.uniqueKey);
+    final isInCart = cartItemIndex != -1;
+    final quantity = isInCart ? cartItems[cartItemIndex].quantity : 0;
 
     final isOutOfStock = product.name.toLowerCase().contains('out of stock') ||
         product.weight.toLowerCase().contains('out of stock');
@@ -847,24 +874,66 @@ class _HomeScreenState extends State<HomeScreen> {
             SizedBox(
               width: double.infinity,
               height: 32,
-              child: ElevatedButton(
-                onPressed: (isInCart || isOutOfStock) ? null : () => _addToCart(product),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isInCart ? Colors.grey.shade300 : style.color,
-                  foregroundColor: isInCart ? Colors.grey.shade600 : Colors.white,
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  elevation: 0,
-                  disabledBackgroundColor: Colors.grey.shade300,
-                  disabledForegroundColor: Colors.grey.shade600,
-                ),
-                child: Text(
-                  isOutOfStock ? 'Out of Stock' : (isInCart ? 'Added ✓' : 'Add to Cart'),
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                ),
-              ),
+              child: isOutOfStock
+                  ? ElevatedButton(
+                      onPressed: null,
+                      style: ElevatedButton.styleFrom(
+                        disabledBackgroundColor: Colors.grey.shade300,
+                        disabledForegroundColor: Colors.grey.shade600,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      child: const Text('Out of Stock', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                    )
+                  : isInCart
+                      ? Container(
+                          decoration: BoxDecoration(
+                            color: style.color.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: style.color),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.remove, size: 16),
+                                color: style.color,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _updateCartQuantity(product, -1),
+                              ),
+                              Text(
+                                '$quantity',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                  color: style.color,
+                                ),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.add, size: 16),
+                                color: style.color,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _updateCartQuantity(product, 1),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ElevatedButton(
+                          onPressed: () => _addToCart(product),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: style.color,
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.zero,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            elevation: 0,
+                          ),
+                          child: const Text('Add to Cart', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                        ),
             ),
           ],
         ),
@@ -878,7 +947,7 @@ class _HomeScreenState extends State<HomeScreen> {
 // Cart Screen
 // ===========================================================================
 class CartScreen extends StatefulWidget {
-  final Map<String, List<Product>> cart;
+  final Map<String, List<CartItem>> cart;
   final void Function(String platform, int index) onRemove;
   final VoidCallback onClear;
   final Future<void> Function(String url, String platform) onOpenApp;
@@ -966,12 +1035,12 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Widget _buildPlatformCartGroup(
-      String platform, List<Product> items) {
+      String platform, List<CartItem> items) {
     final style = platformStyles[platform] ??
         PlatformStyle(Colors.grey, Colors.grey.shade100, Icons.store);
 
-    final subtotal = items.fold<double>(0, (sum, p) => sum + p.price);
-    final deepLink = items.isNotEmpty ? items.first.deepLink : '';
+    final subtotal = items.fold<double>(0, (sum, p) => sum + (p.product.price * p.quantity));
+    final deepLink = items.isNotEmpty ? items.first.product.deepLink : '';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -1024,7 +1093,8 @@ class _CartScreenState extends State<CartScreen> {
 
           // Item list
           ...List.generate(items.length, (index) {
-            final item = items[index];
+            final cartItem = items[index];
+            final item = cartItem.product;
             return ListTile(
               contentPadding:
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
@@ -1034,14 +1104,14 @@ class _CartScreenState extends State<CartScreen> {
                     const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
               ),
               subtitle: Text(
-                item.weight,
+                '${item.weight}  •  Qty: ${cartItem.quantity}',
                 style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
               ),
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    '₹${item.price.toStringAsFixed(0)}',
+                    '₹${(item.price * cartItem.quantity).toStringAsFixed(0)}',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,

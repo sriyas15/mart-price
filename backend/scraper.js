@@ -13,86 +13,86 @@ async function initBrowser() {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helper: extract multiple products from a page's DOM
-// Returns an array of { name, price, weight } (up to `limit` items)
+// Helper: parse weight from text, preferring specific units over "pack"
 // ---------------------------------------------------------------------------
-function buildExtractScript(limit = 8) {
-  return (maxItems) => {
-    const seen = new Set();
-    const products = [];
-    const elements = Array.from(document.querySelectorAll('div, a, span'))
-      .filter(el => el.innerText && el.innerText.includes('₹') && el.innerText.length > 20 && el.innerText.length < 200);
-
-    for (const el of elements) {
-      if (products.length >= maxItems) break;
-      const text = el.innerText;
-      const priceMatch = text.match(/₹\s*(\d+)/);
-      if (!priceMatch) continue;
-      const price = parseFloat(priceMatch[1]);
-      if (price <= 5 || price >= 5000) continue;
-
-      const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-      let name = lines.find(l =>
-        l.length > 4 &&
-        !l.includes('% OFF') &&
-        !l.includes('MINS') &&
-        !l.includes('₹') &&
-        l !== 'ADD' &&
-        l !== 'OFF'
-      ) || null;
-      if (!name) continue;
-
-      // Deduplicate by name+price
-      const key = `${name}__${price}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const weightMatch = text.match(/(\d+\s*(g|kg|ml|l|pc|pcs|pack))/i);
-      const weight = weightMatch ? weightMatch[1] : 'Standard';
-
-      // Attempt to find the product image by traversing up the DOM
-      let imageUrl = '';
-      let curr = el;
-      for (let i = 0; i < 5; i++) {
-        if (!curr) break;
-        const img = curr.querySelector('img');
-        if (img && img.src && img.src.startsWith('http') && !img.src.includes('icon') && !img.src.includes('logo')) {
-          imageUrl = img.src;
-          break;
-        }
-        curr = curr.parentElement;
-      }
-
-      products.push({ name, price, weight, image_url: imageUrl });
-    }
-    return products.length > 0 ? products : null;
-  };
+function parseWeight(text) {
+  // First try "1 pack (250 ml)" → extract "250 ml"
+  const fullPackMatch = text.match(/\d+\s*pack\s*\((\d+\s*(ml|g|kg|l))\)/i);
+  if (fullPackMatch) return fullPackMatch[1];
+  // Then try specific units
+  const specific = text.match(/(\d+\s*(ml|g|kg|l)\b)/i);
+  if (specific) return specific[1];
+  // Fall back to pack/pcs
+  const generic = text.match(/(\d+\s*(pc|pcs|pack)\b)/i);
+  if (generic) return generic[1];
+  return 'Standard';
 }
 
 // ---------------------------------------------------------------------------
-// Retry logic to handle slow-loading skeleton screens (e.g. BigBasket)
+// Retry wrapper: run an evaluate function with retries for skeleton screens
 // ---------------------------------------------------------------------------
-async function extractWithRetry(page, limit = 8, retries = 6) {
+async function retryEvaluate(page, evalFn, retries = 6) {
   for (let i = 0; i < retries; i++) {
-    const data = await page.evaluate(buildExtractScript(limit), limit);
+    const data = await page.evaluate(evalFn);
     if (data && data.length > 0) return data;
-    await new Promise(r => setTimeout(r, 2000)); // wait 2s before retry
+    await new Promise(r => setTimeout(r, 2000));
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Blinkit Scraper — returns array of products
+// Blinkit Scraper — API Interception (Bypasses lazy loading completely)
 // ---------------------------------------------------------------------------
 async function scrapeBlinkit(query) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
-    await page.goto(`https://blinkit.com/s/?q=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    const data = await extractWithRetry(page, 8);
-    return data;
+    let apiData = null;
+    page.on('response', async res => {
+      const url = res.url();
+      if (url.includes('/v1/layout/search?q=') && !apiData) {
+        try {
+          apiData = await res.json();
+        } catch (e) { }
+      }
+    });
+
+    await page.goto(`https://blinkit.com/s/?q=${encodeURIComponent(query)}`, { waitUntil: 'networkidle2', timeout: 20000 });
+
+    if (apiData && apiData.response && apiData.response.snippets) {
+      const products = [];
+      const seen = new Set();
+      
+      for (const snippet of apiData.response.snippets) {
+        if (snippet.widget_type === 'product_card_snippet_type_2' || snippet.widget_type === 'product_card_snippet') {
+          const d = snippet.data;
+          if (!d) continue;
+
+          const name = d.name ? d.name.text : null;
+          let priceText = d.normal_price ? d.normal_price.text : (d.mrp ? d.mrp.text : null);
+          const weight = d.variant ? d.variant.text : 'Standard';
+          const imageUrl = d.image ? d.image.url : '';
+
+          if (!name || !priceText) continue;
+
+          const priceMatch = priceText.match(/(\d+)/);
+          if (!priceMatch) continue;
+          const price = parseFloat(priceMatch[1]);
+          if (price <= 5 || price >= 5000) continue;
+
+          const key = `${name}__${price}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          products.push({ name, price, weight, image_url: imageUrl });
+        }
+      }
+      return products.length > 0 ? products : null;
+    }
+    
+    return null;
   } catch (e) {
-    console.error('Blinkit scrape error:', e.message);
+    console.error('Blinkit API scrape error:', e.message);
     return null;
   } finally {
     await page.close();
@@ -100,14 +100,67 @@ async function scrapeBlinkit(query) {
 }
 
 // ---------------------------------------------------------------------------
-// Zepto Scraper — returns array of products
+// Zepto Scraper — site-specific card extraction using <a> link cards
 // ---------------------------------------------------------------------------
 async function scrapeZepto(query) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
     await page.goto(`https://www.zeptonow.com/search?query=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    const data = await extractWithRetry(page, 8);
+
+    const data = await retryEvaluate(page, () => {
+      const seen = new Set();
+      const products = [];
+
+      // Zepto product cards are <a> links with href containing product URLs
+      const linkCards = Array.from(document.querySelectorAll('a')).filter(a => {
+        const t = a.innerText || '';
+        return t.includes('₹') && t.length > 30 && t.length < 300;
+      });
+
+      for (const card of linkCards) {
+        const text = card.innerText;
+        const priceMatch = text.match(/₹\s*(\d+)/);
+        if (!priceMatch) continue;
+        const price = parseFloat(priceMatch[1]);
+        if (price <= 5 || price >= 5000) continue;
+
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        const name = lines.find(l =>
+          l.length > 4 &&
+          !l.includes('% OFF') &&
+          !l.includes('MINS') &&
+          !l.includes('₹') &&
+          l !== 'ADD' &&
+          l !== 'OFF'
+        );
+        if (!name) continue;
+
+        const key = `${name}__${price}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        // Weight: parse from text, preferring specific units
+        const fullPackMatch = text.match(/\d+\s*pack\s*\((\d+\s*(ml|g|kg|l))\)/i);
+        const specific = text.match(/(\d+\s*(ml|g|kg|l)\b)/i);
+        const generic = text.match(/(\d+\s*(pc|pcs|pack)\b)/i);
+        const weight = fullPackMatch ? fullPackMatch[1] : specific ? specific[1] : generic ? generic[1] : 'Standard';
+
+        // Image: find the real product image within this card (not Ad images)
+        const imgs = Array.from(card.querySelectorAll('img')).filter(img =>
+          img.src &&
+          img.src.startsWith('http') &&
+          !img.src.includes('Ad.png') &&
+          !img.src.includes('icon') &&
+          !img.src.includes('logo')
+        );
+        const imageUrl = imgs.length > 0 ? imgs[0].src : '';
+
+        products.push({ name, price, weight, image_url: imageUrl });
+      }
+      return products.length > 0 ? products : null;
+    });
+
     return data;
   } catch (e) {
     console.error('Zepto scrape error:', e.message);
@@ -138,7 +191,7 @@ async function scrapeBigBasket(query) {
           return null;
         }
         
-        const rawProducts = j.tabs[0].product_info.products.slice(0, 8);
+        const rawProducts = j.tabs[0].product_info.products.slice(0, 40);
         return rawProducts.map(p => ({
           name: ((p.brand && p.brand.name ? p.brand.name + ' ' : '') + p.desc).trim(),
           weight: p.w || '',
