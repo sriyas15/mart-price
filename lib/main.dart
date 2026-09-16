@@ -18,8 +18,12 @@ class MartCompareApp extends StatelessWidget {
       title: 'MartCompare',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF1A73E8),
+          brightness: Brightness.light,
+        ),
         useMaterial3: true,
+        fontFamily: 'Roboto',
       ),
       home: const HomeScreen(),
     );
@@ -27,13 +31,79 @@ class MartCompareApp extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-mapped Chennai area coordinates for manual location selection
+// Data Models
+// ---------------------------------------------------------------------------
+class Product {
+  final String platform;
+  final String name;
+  final String weight;
+  final double price;
+  final String imageUrl;
+  final String eta;
+  final String deepLink;
+
+  Product({
+    required this.platform,
+    required this.name,
+    required this.weight,
+    required this.price,
+    required this.imageUrl,
+    required this.eta,
+    required this.deepLink,
+  });
+
+  factory Product.fromJson(Map<String, dynamic> json) {
+    return Product(
+      platform: json['platform'] ?? '',
+      name: json['product_name'] ?? 'Unknown',
+      weight: json['weight'] ?? 'Standard',
+      price: (json['price'] as num).toDouble(),
+      imageUrl: json['image_url'] ?? '',
+      eta: json['eta'] ?? '',
+      deepLink: json['deep_link'] ?? '',
+    );
+  }
+
+  // For cart deduplication
+  String get uniqueKey => '${platform}_${name}_$price';
+}
+
+// ---------------------------------------------------------------------------
+// Platform visual config
+// ---------------------------------------------------------------------------
+class PlatformStyle {
+  final Color color;
+  final Color bgColor;
+  final IconData icon;
+
+  const PlatformStyle(this.color, this.bgColor, this.icon);
+}
+
+final Map<String, PlatformStyle> platformStyles = {
+  'Blinkit': PlatformStyle(
+    const Color(0xFFF5C518),
+    const Color(0xFFFFF9E0),
+    Icons.flash_on,
+  ),
+  'Zepto': PlatformStyle(
+    const Color(0xFF7B2FF2),
+    const Color(0xFFF3EAFF),
+    Icons.bolt,
+  ),
+  'BigBasket': PlatformStyle(
+    const Color(0xFF84C225),
+    const Color(0xFFF0F9E0),
+    Icons.shopping_basket,
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// Chennai Areas
 // ---------------------------------------------------------------------------
 class ChennaiArea {
   final String name;
   final double lat;
   final double lon;
-
   const ChennaiArea(this.name, this.lat, this.lon);
 }
 
@@ -59,8 +129,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Use your machine's local network IP when testing on a physical device.
-  // Use 10.0.2.2 for Android emulator (maps to host localhost).
+  // Backend URL: Use 10.0.2.2 for Android emulator (maps to host localhost)
   static const String _backendBase = 'http://10.0.2.2:4000/api';
 
   // Location state
@@ -74,10 +143,21 @@ class _HomeScreenState extends State<HomeScreen> {
   List<String> _suggestions = [];
   Timer? _debounce;
 
-  // Results state
-  List<dynamic> _results = [];
+  // Results state: platform name -> list of products
+  Map<String, List<Product>> _results = {};
   bool _isLoading = false;
   String? _errorMessage;
+
+  // Cart state: platform name -> list of products
+  final Map<String, List<Product>> _cart = {};
+
+  int get _cartItemCount {
+    int count = 0;
+    for (final items in _cart.values) {
+      count += items.length;
+    }
+    return count;
+  }
 
   @override
   void initState() {
@@ -96,59 +176,44 @@ class _HomeScreenState extends State<HomeScreen> {
   // Location: GPS Auto-Detect
   // ---------------------------------------------------------------------------
   Future<void> _detectGpsLocation() async {
-    setState(() {
-      _errorMessage = null;
-    });
-
+    setState(() => _errorMessage = null);
     try {
-      // Check if location services are enabled
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
         _showError('Location services are disabled. Please enable GPS.');
         return;
       }
-
-      // Check and request permission
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          _showError('Location permission denied. Please select an area manually.');
+          _showError('Location permission denied.');
           return;
         }
       }
-
       if (permission == LocationPermission.deniedForever) {
-        _showError(
-          'Location permission permanently denied. Use the area dropdown instead.',
-        );
+        _showError('Location permission permanently denied. Use area dropdown.');
         return;
       }
-
-      // Get current position
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
           timeLimit: Duration(seconds: 10),
         ),
       );
-
       setState(() {
         _lat = position.latitude;
         _lon = position.longitude;
-        _locationLabel = 'GPS (${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)})';
+        _locationLabel =
+            'GPS (${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)})';
         _gpsActive = true;
       });
-
       _showSuccess('Location detected via GPS!');
     } catch (e) {
-      _showError('GPS detection failed. Please select an area manually.');
+      _showError('GPS detection failed. Select an area manually.');
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Location: Manual Area Selection
-  // ---------------------------------------------------------------------------
   void _selectArea(ChennaiArea area) {
     setState(() {
       _lat = area.lat;
@@ -161,22 +226,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Search: Fetch Auto-Suggestions from Backend
+  // Search Suggestions
   // ---------------------------------------------------------------------------
   Future<void> _fetchSuggestions(String query) async {
     try {
-      final uri = Uri.parse('$_backendBase/suggestions?q=${Uri.encodeComponent(query)}');
+      final uri =
+          Uri.parse('$_backendBase/suggestions?q=${Uri.encodeComponent(query)}');
       final response = await http.get(uri).timeout(const Duration(seconds: 3));
-
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         setState(() {
           _suggestions = List<String>.from(data['suggestions'] ?? []);
         });
       }
-    } catch (_) {
-      // Suggestions are non-critical; fail silently
-    }
+    } catch (_) {}
   }
 
   void _onSearchChanged(String text) {
@@ -187,44 +250,83 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Core: Execute Landed Cost Comparison
+  // Core: Run search comparison
   // ---------------------------------------------------------------------------
   Future<void> _runComparison(String query) async {
     if (query.trim().isEmpty) {
       _showError('Please enter a product name to search.');
       return;
     }
-
     FocusScope.of(context).unfocus();
-
     setState(() {
       _isLoading = true;
       _errorMessage = null;
-      _results = [];
+      _results = {};
     });
 
     try {
       final uri = Uri.parse(
         '$_backendBase/compare?query=${Uri.encodeComponent(query)}&lat=$_lat&lon=$_lon',
       );
-      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+      final response =
+          await http.get(uri).timeout(const Duration(seconds: 60));
       final data = json.decode(response.body);
 
       if (response.statusCode == 200 && data['success'] == true) {
-        setState(() {
-          _results = data['results'] ?? [];
+        final Map<String, dynamic> rawResults = data['results'] ?? {};
+        final Map<String, List<Product>> parsed = {};
+        rawResults.forEach((platform, products) {
+          parsed[platform] = (products as List)
+              .map((p) => Product.fromJson(p as Map<String, dynamic>))
+              .toList();
         });
-        _showSuccess('Found ${_results.length} mart prices for $_locationLabel!');
+        setState(() => _results = parsed);
+        final total =
+            parsed.values.fold<int>(0, (s, list) => s + list.length);
+        _showSuccess('Found $total products across ${parsed.length} platforms!');
       } else {
         _showError(data['message'] ?? 'Could not find "$query".');
       }
     } on TimeoutException {
-      _showError('Request timed out. Please check your connection and try again.');
+      _showError('Request timed out. Please try again.');
     } catch (e) {
-      _showError('Cannot connect to backend. Make sure the Node.js server is running on port 4000.');
+      _showError(
+          'Cannot connect to backend. Make sure the server is running on port 4000.');
     } finally {
       setState(() => _isLoading = false);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cart Management
+  // ---------------------------------------------------------------------------
+  void _addToCart(Product product) {
+    setState(() {
+      _cart.putIfAbsent(product.platform, () => []);
+      // Prevent duplicates
+      final exists =
+          _cart[product.platform]!.any((p) => p.uniqueKey == product.uniqueKey);
+      if (!exists) {
+        _cart[product.platform]!.add(product);
+        _showSuccess('${product.name} added to cart!');
+      } else {
+        _showError('${product.name} is already in your cart.');
+      }
+    });
+  }
+
+  void _removeFromCart(String platform, int index) {
+    setState(() {
+      _cart[platform]?.removeAt(index);
+      if (_cart[platform]?.isEmpty ?? true) {
+        _cart.remove(platform);
+      }
+    });
+  }
+
+  void _clearCart() {
+    setState(() => _cart.clear());
+    _showSuccess('Cart cleared.');
   }
 
   // ---------------------------------------------------------------------------
@@ -233,7 +335,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openMartApp(String url, String platform) async {
     final uri = Uri.parse(url);
     try {
-      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!launched) {
         _showError('Could not open $platform. The app may not be installed.');
       }
@@ -291,12 +394,12 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text(
           'MartCompare',
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
         ),
-        backgroundColor: Colors.teal,
+        backgroundColor: const Color(0xFF1A73E8),
         foregroundColor: Colors.white,
+        elevation: 0,
         actions: [
-          // GPS auto-detect button
           IconButton(
             icon: Icon(_gpsActive ? Icons.gps_fixed : Icons.gps_not_fixed),
             tooltip: 'Detect GPS location',
@@ -306,30 +409,49 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
-          // ── Location Bar ──
           _buildLocationBar(),
-          // ── Search Bar ──
           _buildSearchBar(),
-          // ── Content Area ──
           Expanded(child: _buildContent()),
         ],
       ),
+      floatingActionButton: _cartItemCount > 0
+          ? FloatingActionButton.extended(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => CartScreen(
+                      cart: _cart,
+                      onRemove: _removeFromCart,
+                      onClear: _clearCart,
+                      onOpenApp: _openMartApp,
+                    ),
+                  ),
+                );
+              },
+              backgroundColor: const Color(0xFF1A73E8),
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.shopping_cart),
+              label: Text('Cart ($_cartItemCount)'),
+            )
+          : null,
     );
   }
 
   // ---------------------------------------------------------------------------
-  // Widget: Location Bar (Dropdown + GPS indicator)
+  // Widget: Location Bar
   // ---------------------------------------------------------------------------
   Widget _buildLocationBar() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.teal.shade50,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A73E8).withOpacity(0.08),
+      ),
       child: Row(
         children: [
           Icon(
             _gpsActive ? Icons.gps_fixed : Icons.location_on,
             size: 16,
-            color: Colors.teal.shade700,
+            color: const Color(0xFF1A73E8),
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -337,13 +459,14 @@ class _HomeScreenState extends State<HomeScreen> {
               child: DropdownButton<int>(
                 value: _gpsActive
                     ? null
-                    : chennaiAreas.indexWhere((a) => a.name == _locationLabel),
+                    : chennaiAreas
+                        .indexWhere((a) => a.name == _locationLabel),
                 hint: Text(
                   _locationLabel,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: Colors.teal.shade800,
+                    color: Color(0xFF1A73E8),
                   ),
                 ),
                 isExpanded: true,
@@ -367,7 +490,7 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: const Icon(Icons.my_location, size: 14),
             label: const Text('Use GPS', style: TextStyle(fontSize: 12)),
             style: TextButton.styleFrom(
-              foregroundColor: Colors.teal.shade700,
+              foregroundColor: const Color(0xFF1A73E8),
               padding: const EdgeInsets.symmetric(horizontal: 8),
             ),
           ),
@@ -377,7 +500,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Widget: Search Bar with Auto-Suggestions
+  // Widget: Search Bar
   // ---------------------------------------------------------------------------
   Widget _buildSearchBar() {
     return Padding(
@@ -385,7 +508,6 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Search input
           Row(
             children: [
               Expanded(
@@ -394,13 +516,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   onChanged: _onSearchChanged,
                   onSubmitted: _runComparison,
                   decoration: InputDecoration(
-                    hintText: 'Search item (e.g. Amul Butter, Coke, Atta)',
+                    hintText: 'Search item (e.g. milk, butter, chips)',
                     prefixIcon: const Icon(Icons.search),
                     filled: true,
                     fillColor: Colors.grey.shade100,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12),
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: BorderRadius.circular(12),
                       borderSide: BorderSide.none,
                     ),
                   ),
@@ -410,17 +533,17 @@ class _HomeScreenState extends State<HomeScreen> {
               ElevatedButton(
                 onPressed: () => _runComparison(_searchCtrl.text),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.teal,
+                  backgroundColor: const Color(0xFF1A73E8),
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(
+                      vertical: 14, horizontal: 16),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
                 ),
-                child: const Text('Compare'),
+                child: const Text('Search'),
               ),
             ],
           ),
-
-          // Suggestion chips
           if (_suggestions.isNotEmpty && !_isLoading) ...[
             const SizedBox(height: 8),
             SizedBox(
@@ -435,8 +558,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       _suggestions[index],
                       style: const TextStyle(fontSize: 12),
                     ),
-                    backgroundColor: Colors.teal.shade50,
-                    side: BorderSide(color: Colors.teal.shade200),
+                    backgroundColor: const Color(0xFFE8F0FE),
+                    side: BorderSide(
+                        color: const Color(0xFF1A73E8).withOpacity(0.3)),
                     onPressed: () {
                       _searchCtrl.text = _suggestions[index];
                       _runComparison(_suggestions[index]);
@@ -452,24 +576,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Widget: Content Area (Loading / Error / Results / Empty)
+  // Widget: Content Area
   // ---------------------------------------------------------------------------
   Widget _buildContent() {
-    // Loading state
     if (_isLoading) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const CircularProgressIndicator(),
+            const CircularProgressIndicator(color: Color(0xFF1A73E8)),
             const SizedBox(height: 14),
             Text(
-              'Searching 3 marts in $_locationLabel...',
+              'Searching across platforms...',
               style: TextStyle(color: Colors.grey.shade600),
             ),
             const SizedBox(height: 4),
             Text(
-              'Calculating delivery + handling + GST',
+              'This may take 10-15 seconds',
               style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
             ),
           ],
@@ -477,7 +600,6 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // Error state with retry
     if (_errorMessage != null && _results.isEmpty) {
       return Center(
         child: Padding(
@@ -492,22 +614,26 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.error_outline, color: Colors.red.shade400, size: 40),
+                Icon(Icons.error_outline,
+                    color: Colors.red.shade400, size: 40),
                 const SizedBox(height: 12),
                 Text(
                   _errorMessage!,
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.red.shade700, fontSize: 14),
+                  style:
+                      TextStyle(color: Colors.red.shade700, fontSize: 14),
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton.icon(
                   onPressed: () => _runComparison(
-                    _searchCtrl.text.isEmpty ? 'Amul Butter' : _searchCtrl.text,
+                    _searchCtrl.text.isEmpty
+                        ? 'Amul Butter'
+                        : _searchCtrl.text,
                   ),
                   icon: const Icon(Icons.refresh, size: 16),
                   label: const Text('Try Again'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.teal,
+                    backgroundColor: const Color(0xFF1A73E8),
                     foregroundColor: Colors.white,
                   ),
                 ),
@@ -518,7 +644,6 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // Empty state (initial screen)
     if (_results.isEmpty) {
       return Center(
         child: Padding(
@@ -526,18 +651,20 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.shopping_cart_outlined, size: 48, color: Colors.grey.shade400),
+              Icon(Icons.shopping_cart_outlined,
+                  size: 48, color: Colors.grey.shade400),
               const SizedBox(height: 12),
               Text(
-                'Search for a product to see the\ntrue landed cost across marts',
+                'Search for a product to compare\nprices across Blinkit, Zepto & BigBasket',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.grey.shade600),
               ),
               const SizedBox(height: 8),
               Text(
-                'Item Price + Delivery + Handling + GST = Final Price',
+                'Add items from any platform to your cart',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                style:
+                    TextStyle(color: Colors.grey.shade500, fontSize: 12),
               ),
             ],
           ),
@@ -545,131 +672,480 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // Results list
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      itemCount: _results.length,
-      itemBuilder: (context, index) {
-        return _buildMartCard(_results[index], isCheapest: index == 0);
-      },
+    // Show platform sections with horizontal scrolling products
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 8, 0, 80),
+      children: _results.entries.map((entry) {
+        return _buildPlatformSection(entry.key, entry.value);
+      }).toList(),
     );
   }
 
   // ---------------------------------------------------------------------------
-  // Widget: Individual Mart Comparison Card
+  // Widget: Platform Section (header + horizontal product list)
   // ---------------------------------------------------------------------------
-  Widget _buildMartCard(Map<String, dynamic> item, {required bool isCheapest}) {
-    final pricing = item['pricing'] as Map<String, dynamic>;
+  Widget _buildPlatformSection(String platform, List<Product> products) {
+    final style = platformStyles[platform] ??
+        PlatformStyle(Colors.grey, Colors.grey.shade100, Icons.store);
 
-    return Card(
-      elevation: isCheapest ? 2 : 0,
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: isCheapest ? Colors.green : Colors.grey.shade300,
-          width: isCheapest ? 2.0 : 1.0,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header row: Platform name + badge
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  item['platform'] ?? '',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Platform header
+        Container(
+          margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: style.bgColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: style.color.withOpacity(0.3)),
+          ),
+          child: Row(
+            children: [
+              Icon(style.icon, color: style.color, size: 22),
+              const SizedBox(width: 10),
+              Text(
+                platform,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: style.color,
                 ),
-                if (isCheapest)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.green,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Text(
-                      'CHEAPEST TOTAL',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 2),
-            Text(
-              '${item['product_name']} • ${item['weight']}  —  ETA: ${item['eta']}',
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
-            ),
-
-            const Divider(height: 18),
-
-            // Fee breakdown rows
-            _feeRow('Item Base Price', '₹${pricing['item_price']}'),
-            _feeRow('Delivery Fee', '₹${pricing['delivery_fee']}'),
-            _feeRow('Handling / Platform Fee', '₹${pricing['handling_fee']}'),
-            _feeRow('GST on Fees (18%)', '₹${pricing['tax_on_fees']}'),
-
-            const Divider(height: 18),
-
-            // Final landed total
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Final Landed Price:',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+              const Spacer(),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: style.color.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                Text(
-                  '₹${pricing['final_landed_price']}',
+                child: Text(
+                  '${products.length} items',
                   style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: isCheapest ? Colors.green.shade800 : Colors.black87,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: style.color,
                   ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Horizontal scrolling product cards
+        SizedBox(
+          height: 320, // Increased height to completely resolve bottom overflow
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            itemCount: products.length,
+            itemBuilder: (context, index) {
+              return _buildProductCard(products[index], style);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Widget: Individual Product Card (inside horizontal scroll)
+  // ---------------------------------------------------------------------------
+  Widget _buildProductCard(Product product, PlatformStyle style) {
+    final isInCart = _cart[product.platform]
+            ?.any((p) => p.uniqueKey == product.uniqueKey) ??
+        false;
+
+    final isOutOfStock = product.name.toLowerCase().contains('out of stock') ||
+        product.weight.toLowerCase().contains('out of stock');
+
+    return Opacity(
+      opacity: isOutOfStock ? 0.5 : 1.0,
+      child: Container(
+        width: 160,
+        margin: const EdgeInsets.only(right: 10),
+        decoration: BoxDecoration(
+          color: isOutOfStock ? Colors.grey.shade100 : Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isInCart ? style.color : Colors.grey.shade200,
+            width: isInCart ? 2 : 1,
+          ),
+          boxShadow: [
+            if (!isOutOfStock)
+              BoxShadow(
+                color: Colors.black.withOpacity(0.04),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+            // Optional image
+            if (product.imageUrl.isNotEmpty) ...[
+              Center(
+                child: Image.network(
+                  product.imageUrl,
+                  height: 60,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) =>
+                      const SizedBox(height: 60),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            // Product name
+            Text(
+              product.name,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                height: 1.3,
+              ),
+            ),
+            const SizedBox(height: 4),
+            // Weight
+            Text(
+              product.weight,
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey.shade600,
+              ),
+            ),
+            const Spacer(),
+            // Price
+            Text(
+              '₹${product.price.toStringAsFixed(0)}',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: style.color,
+              ),
+            ),
+            const SizedBox(height: 4),
+            // ETA
+            Row(
+              children: [
+                Icon(Icons.access_time, size: 12, color: Colors.grey.shade500),
+                const SizedBox(width: 3),
+                Text(
+                  product.eta,
+                  style: TextStyle(
+                      fontSize: 10, color: Colors.grey.shade500),
                 ),
               ],
             ),
-
-            const SizedBox(height: 12),
-
-            // Deep link button
+            const SizedBox(height: 8),
+            // Add to cart button
             SizedBox(
               width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: () => _openMartApp(
-                  item['deep_link'] ?? '',
-                  item['platform'] ?? '',
-                ),
-                icon: const Icon(Icons.open_in_new, size: 16),
-                label: Text('Order on ${item['platform']}'),
+              height: 32,
+              child: ElevatedButton(
+                onPressed: (isInCart || isOutOfStock) ? null : () => _addToCart(product),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: isCheapest ? Colors.green.shade700 : Colors.grey.shade800,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  backgroundColor: isInCart ? Colors.grey.shade300 : style.color,
+                  foregroundColor: isInCart ? Colors.grey.shade600 : Colors.white,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  elevation: 0,
+                  disabledBackgroundColor: Colors.grey.shade300,
+                  disabledForegroundColor: Colors.grey.shade600,
+                ),
+                child: Text(
+                  isOutOfStock ? 'Out of Stock' : (isInCart ? 'Added ✓' : 'Add to Cart'),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                 ),
               ),
             ),
           ],
         ),
       ),
+    ),
+    );
+  }
+}
+
+// ===========================================================================
+// Cart Screen
+// ===========================================================================
+class CartScreen extends StatefulWidget {
+  final Map<String, List<Product>> cart;
+  final void Function(String platform, int index) onRemove;
+  final VoidCallback onClear;
+  final Future<void> Function(String url, String platform) onOpenApp;
+
+  const CartScreen({
+    super.key,
+    required this.cart,
+    required this.onRemove,
+    required this.onClear,
+    required this.onOpenApp,
+  });
+
+  @override
+  State<CartScreen> createState() => _CartScreenState();
+}
+
+class _CartScreenState extends State<CartScreen> {
+  @override
+  Widget build(BuildContext context) {
+    final isEmpty = widget.cart.isEmpty ||
+        widget.cart.values.every((list) => list.isEmpty);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Your Cart',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        backgroundColor: const Color(0xFF1A73E8),
+        foregroundColor: Colors.white,
+        elevation: 0,
+        actions: [
+          if (!isEmpty)
+            TextButton(
+              onPressed: () {
+                widget.onClear();
+                setState(() {});
+              },
+              child: const Text(
+                'Clear All',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ),
+        ],
+      ),
+      body: isEmpty ? _buildEmptyCart() : _buildCartContent(),
     );
   }
 
-  Widget _feeRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+  Widget _buildEmptyCart() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: TextStyle(fontSize: 13, color: Colors.grey.shade700)),
-          Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+          Icon(Icons.shopping_cart_outlined,
+              size: 64, color: Colors.grey.shade300),
+          const SizedBox(height: 16),
+          Text(
+            'Your cart is empty',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Search for products and add them to your cart',
+            style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCartContent() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      children: widget.cart.entries
+          .where((e) => e.value.isNotEmpty)
+          .map((entry) {
+        return _buildPlatformCartGroup(entry.key, entry.value);
+      }).toList(),
+    );
+  }
+
+  Widget _buildPlatformCartGroup(
+      String platform, List<Product> items) {
+    final style = platformStyles[platform] ??
+        PlatformStyle(Colors.grey, Colors.grey.shade100, Icons.store);
+
+    final subtotal = items.fold<double>(0, (sum, p) => sum + p.price);
+    final deepLink = items.isNotEmpty ? items.first.deepLink : '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: style.color.withOpacity(0.3)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Platform header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: style.bgColor,
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
+            child: Row(
+              children: [
+                Icon(style.icon, color: style.color, size: 22),
+                const SizedBox(width: 10),
+                Text(
+                  platform,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: style.color,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${items.length} item${items.length > 1 ? 's' : ''}',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: style.color.withOpacity(0.7),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Item list
+          ...List.generate(items.length, (index) {
+            final item = items[index];
+            return ListTile(
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+              title: Text(
+                item.name,
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              ),
+              subtitle: Text(
+                item.weight,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '₹${item.price.toStringAsFixed(0)}',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: style.color,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    onPressed: () {
+                      widget.onRemove(platform, index);
+                      setState(() {});
+                    },
+                    icon: Icon(Icons.close,
+                        size: 18, color: Colors.red.shade400),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                        minWidth: 28, minHeight: 28),
+                  ),
+                ],
+              ),
+            );
+          }),
+
+          const Divider(height: 1),
+
+          // Subtotal row
+          Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Subtotal (base prices):',
+                  style: TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  '₹${subtotal.toStringAsFixed(0)}',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: style.color,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Disclaimer
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline,
+                      size: 14, color: Colors.amber.shade800),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Excludes delivery, handling & tax charges. Final total may differ.',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.amber.shade900,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // Open app button
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+            child: SizedBox(
+              width: double.infinity,
+              height: 44,
+              child: ElevatedButton.icon(
+                onPressed: () => widget.onOpenApp(deepLink, platform),
+                icon: const Icon(Icons.open_in_new, size: 18),
+                label: Text(
+                  'Open $platform',
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: style.color,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 0,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
