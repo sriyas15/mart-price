@@ -6,6 +6,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Initialize Scraper
+scraper.initBrowser();
+
 const PORT = process.env.PORT || 4000;
 
 // ---------------------------------------------------------------------------
@@ -127,11 +130,13 @@ app.get('/api/compare', async (req, res) => {
         const products = await scraper[config.scraper](query);
         if (products && products.length > 0) {
           results[platform] = products.map((p) => ({
+            id: p.id,
             platform,
             product_name: p.name,
             weight: p.weight,
             price: p.price,
             image_url: p.image_url || '',
+            in_stock: p.in_stock !== undefined ? p.in_stock : true,
             eta: config.eta,
             deep_link: config.deepLink(query),
           }));

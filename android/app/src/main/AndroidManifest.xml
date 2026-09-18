@@ -47,5 +47,9 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Packages required for Auto-Cart launching -->
+        <package android:name="com.bigbasket.mobileapp" />
+        <package android:name="com.zepto" />
+        <package android:name="com.grofers.customerapp" />
     </queries>
 </manifest>

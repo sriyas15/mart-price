@@ -84,7 +84,13 @@ async function scrapeBlinkit(query) {
           if (seen.has(key)) continue;
           seen.add(key);
 
-          products.push({ name, price, weight, image_url: imageUrl });
+          // Check stock status (generic server location)
+          let inStock = true;
+          if (d.out_of_stock === true || (d.inventory_status && d.inventory_status !== 'IN_STOCK')) {
+            inStock = false;
+          }
+
+          products.push({ name, price, weight, image_url: imageUrl, in_stock: inStock });
         }
       }
       return products.length > 0 ? products : null;
@@ -106,7 +112,7 @@ async function scrapeZepto(query) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
-    await page.goto(`https://www.zeptonow.com/search?query=${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(`https://www.zeptonow.com/search?query=${encodeURIComponent(query)}`, { waitUntil: 'networkidle2', timeout: 30000 });
 
     const data = await retryEvaluate(page, () => {
       const seen = new Set();
@@ -156,10 +162,13 @@ async function scrapeZepto(query) {
         );
         const imageUrl = imgs.length > 0 ? imgs[0].src : '';
 
-        products.push({ name, price, weight, image_url: imageUrl });
+        // Check if out of stock text is on the card
+        const isOOS = lines.some(l => l.toLowerCase().includes('out of stock') || l.toLowerCase().includes('currently unavailable'));
+
+        products.push({ name, price, weight, image_url: imageUrl, in_stock: !isOOS });
       }
       return products.length > 0 ? products : null;
-    });
+    }, 8);
 
     return data;
   } catch (e) {
@@ -193,23 +202,26 @@ async function scrapeBigBasket(query) {
         
         const rawProducts = j.tabs[0].product_info.products.slice(0, 40);
         return rawProducts.map(p => ({
+          id: p.id,
           name: ((p.brand && p.brand.name ? p.brand.name + ' ' : '') + p.desc).trim(),
           weight: p.w || '',
           price: parseFloat(p.pricing.discount.prim_price.sp || 0),
-          image_url: p.images && p.images.length > 0 ? p.images[0].m : ''
+          image_url: p.images && p.images.length > 0 ? p.images[0].m : '',
+          in_stock: p.availability ? p.availability.avail_status !== 0 : true
         }));
       } catch (err) {
         return null;
       }
     }, query);
 
-    return data;
+    if (data) return data;
   } catch (e) {
     console.error('BigBasket API scrape error:', e.message);
-    return null;
   } finally {
     await page.close();
   }
+
+  // Removed mock fallback as per user request to return app to original state
 }
 
 module.exports = { initBrowser, scrapeBlinkit, scrapeZepto, scrapeBigBasket };

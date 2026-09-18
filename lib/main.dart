@@ -2,8 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'link_accounts_screen.dart';
+import 'cart_sync_service.dart';
 
 void main() {
   runApp(const MartCompareApp());
@@ -35,32 +40,38 @@ class MartCompareApp extends StatelessWidget {
 // ---------------------------------------------------------------------------
 class Product {
   final String platform;
+  final String id;
   final String name;
   final String weight;
   final double price;
   final String imageUrl;
   final String eta;
   final String deepLink;
+  final bool inStock;
 
   Product({
     required this.platform,
+    required this.id,
     required this.name,
     required this.weight,
     required this.price,
     required this.imageUrl,
     required this.eta,
     required this.deepLink,
+    this.inStock = true,
   });
 
   factory Product.fromJson(Map<String, dynamic> json) {
     return Product(
       platform: json['platform'] ?? '',
-      name: json['product_name'] ?? 'Unknown',
+      id: json['id']?.toString() ?? '',
+      name: json['product_name'] ?? json['name'] ?? 'Unknown',
       weight: json['weight'] ?? 'Standard',
-      price: (json['price'] as num).toDouble(),
+      price: (json['price'] as num?)?.toDouble() ?? 0.0,
       imageUrl: json['image_url'] ?? '',
       eta: json['eta'] ?? '',
       deepLink: json['deep_link'] ?? '',
+      inStock: json['in_stock'] ?? true,
     );
   }
 
@@ -427,6 +438,16 @@ class _HomeScreenState extends State<HomeScreen> {
         elevation: 0,
         actions: [
           IconButton(
+            icon: const Icon(Icons.link),
+            tooltip: 'Link Accounts',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const LinkAccountsScreen()),
+              );
+            },
+          ),
+          IconButton(
             icon: Icon(_gpsActive ? Icons.gps_fixed : Icons.gps_not_fixed),
             tooltip: 'Detect GPS location',
             onPressed: _detectGpsLocation,
@@ -784,7 +805,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final isInCart = cartItemIndex != -1;
     final quantity = isInCart ? cartItems[cartItemIndex].quantity : 0;
 
-    final isOutOfStock = product.name.toLowerCase().contains('out of stock') ||
+    final isOutOfStock = !product.inStock || product.name.toLowerCase().contains('out of stock') ||
         product.weight.toLowerCase().contains('out of stock');
 
     return Opacity(
@@ -816,12 +837,33 @@ class _HomeScreenState extends State<HomeScreen> {
             // Optional image
             if (product.imageUrl.isNotEmpty) ...[
               Center(
-                child: Image.network(
-                  product.imageUrl,
-                  height: 60,
-                  fit: BoxFit.contain,
-                  errorBuilder: (context, error, stackTrace) =>
-                      const SizedBox(height: 60),
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Image.network(
+                      product.imageUrl,
+                      height: 60,
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stackTrace) =>
+                          const SizedBox(height: 60),
+                    ),
+                    if (isOutOfStock)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'OUT OF STOCK',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
               const SizedBox(height: 8),
@@ -965,6 +1007,161 @@ class CartScreen extends StatefulWidget {
 }
 
 class _CartScreenState extends State<CartScreen> {
+  static const platformChannel = MethodChannel('mart_price/accessibility');
+  final _storage = const FlutterSecureStorage();
+  bool _isSyncing = false;
+
+  Future<void> _triggerAutoCart(String platformName, List<CartItem> items) async {
+    // If it's BigBasket, try the backend API first
+    if (platformName == 'BigBasket') {
+      final linkedStr = await _storage.read(key: 'bigbasket_linked');
+      if (linkedStr == 'true') {
+        // We have linked accounts! Use Headless WebView API!
+        if (!mounted) return;
+        setState(() => _isSyncing = true);
+        
+        try {
+          final itemList = items.map((i) => {
+            'id': i.product.id,
+            'name': i.product.name,
+            'price': i.product.price,
+            'quantity': i.quantity
+          }).toList();
+
+          final result = await CartSyncService.syncBigBasket(itemList);
+
+          if ((result['errors'] as List).isEmpty) {
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Successfully synced ${result['added']} items to BigBasket via WebView!')),
+            );
+            // Open a visible InAppWebView so the user can see the cart with the same cookies
+            Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
+              appBar: AppBar(title: const Text('BigBasket Checkout')),
+              body: InAppWebView(
+                initialUrlRequest: URLRequest(url: WebUri('https://www.bigbasket.com/basket/')),
+                initialSettings: InAppWebViewSettings(
+                  useShouldOverrideUrlLoading: true,
+                ),
+                shouldOverrideUrlLoading: (controller, navigationAction) async {
+                  var uri = navigationAction.request.url!;
+                  if (!["http", "https", "file", "chrome", "data", "javascript", "about"].contains(uri.scheme)) {
+                    return NavigationActionPolicy.CANCEL;
+                  }
+                  return NavigationActionPolicy.ALLOW;
+                },
+              ),
+            )));
+          } else {
+            if (!mounted) return;
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Sync Errors'),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: SingleChildScrollView(
+                    child: SelectableText(result['errors'].join('\n\n')),
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close'),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.pop(context); // Close dialog
+                      // Open visible InAppWebView
+                      Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
+                        appBar: AppBar(title: const Text('BigBasket Checkout')),
+                        body: InAppWebView(
+                          initialUrlRequest: URLRequest(url: WebUri('https://www.bigbasket.com/basket/')),
+                          initialSettings: InAppWebViewSettings(
+                            useShouldOverrideUrlLoading: true,
+                          ),
+                          shouldOverrideUrlLoading: (controller, navigationAction) async {
+                            var uri = navigationAction.request.url!;
+                            if (!["http", "https", "file", "chrome", "data", "javascript", "about"].contains(uri.scheme)) {
+                              return NavigationActionPolicy.CANCEL;
+                            }
+                            return NavigationActionPolicy.ALLOW;
+                          },
+                        ),
+                      )));
+                    },
+                    child: const Text('Continue to Checkout', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
+            );
+          }
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error during sync: $e')),
+          );
+        } finally {
+          if (mounted) setState(() => _isSyncing = false);
+        }
+        return; // Don't run accessibility service
+      } else {
+        // Not linked, prompt them
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Connect Account'),
+            content: const Text('For instant background syncing, please link your BigBasket account.'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _runAccessibilityFallback(platformName, items); // Fallback to old method
+                },
+                child: const Text('Use old method'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const LinkAccountsScreen()),
+                  );
+                },
+                child: const Text('Link Account'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+    } else {
+      // Zepto and Blinkit fallback to old method for now
+      _runAccessibilityFallback(platformName, items);
+    }
+  }
+
+  Future<void> _runAccessibilityFallback(String platformName, List<CartItem> items) async {
+    final deepLink = items.isNotEmpty ? items.first.product.deepLink : '';
+    await widget.onOpenApp(deepLink, platformName);
+    
+    // Also trigger accessibility method channel
+    final itemList = items.map((i) => {
+      'id': i.product.id,
+      'name': i.product.name,
+      'price': i.product.price,
+      'quantity': i.quantity,
+    }).toList();
+
+    try {
+      await platformChannel.invokeMethod('add_to_cart', {
+        'platform': platformName,
+        'items': itemList,
+      });
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final isEmpty = widget.cart.isEmpty ||
@@ -1041,6 +1238,13 @@ class _CartScreenState extends State<CartScreen> {
 
     final subtotal = items.fold<double>(0, (sum, p) => sum + (p.product.price * p.quantity));
     final deepLink = items.isNotEmpty ? items.first.product.deepLink : '';
+
+    final itemList = items.map((i) => {
+      'id': i.product.id,
+      'name': i.product.name,
+      'price': i.product.price,
+      'quantity': i.quantity,
+    }).toList();
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -1191,29 +1395,57 @@ class _CartScreenState extends State<CartScreen> {
             ),
           ),
 
-          // Open app button
+          // Open app & Auto-Cart buttons
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
-            child: SizedBox(
-              width: double.infinity,
-              height: 44,
-              child: ElevatedButton.icon(
-                onPressed: () => widget.onOpenApp(deepLink, platform),
-                icon: const Icon(Icons.open_in_new, size: 18),
-                label: Text(
-                  'Open $platform',
-                  style: const TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.w600),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: style.color,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 44,
+                    child: OutlinedButton.icon(
+                      onPressed: () => widget.onOpenApp(deepLink, platform),
+                      icon: Icon(Icons.open_in_new, size: 18, color: style.color),
+                      label: Text(
+                        'Open App',
+                        style: TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600, color: style.color),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: style.color),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
                   ),
-                  elevation: 0,
                 ),
-              ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: SizedBox(
+                    height: 44,
+                    child: ElevatedButton.icon(
+                      onPressed: _isSyncing ? null : () => _triggerAutoCart(platform, items),
+                      icon: _isSyncing && platform == 'BigBasket'
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                          : const Icon(Icons.auto_awesome, size: 18),
+                      label: Text(
+                        _isSyncing && platform == 'BigBasket' ? 'Syncing...' : 'Auto-Fill Cart',
+                        style: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: style.color,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        elevation: 0,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
