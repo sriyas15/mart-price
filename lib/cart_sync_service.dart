@@ -156,4 +156,268 @@ class CartSyncService {
     
     return {'added': addedCount, 'errors': errors};
   }
+
+  static Future<Map<String, dynamic>> syncZepto(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty) return {'added': 0, 'errors': []};
+    
+    int addedCount = 0;
+    List<String> errors = [];
+    
+    for (var item in items) {
+      HeadlessInAppWebView? headlessWebView;
+      final encodedQuery = Uri.encodeComponent(item['name']);
+      
+      headlessWebView = HeadlessInAppWebView(
+        initialUrlRequest: URLRequest(url: WebUri("https://www.zeptonow.com/search?query=$encodedQuery")),
+      );
+
+      await headlessWebView.run();
+      
+      try {
+        String? result;
+        for (int i = 0; i < 50; i++) {
+          await Future.delayed(const Duration(milliseconds: 600));
+          try {
+            final status = await headlessWebView.webViewController?.evaluateJavascript(source: '''
+              (function() {
+                 if (window._addSuccess) return "success";
+                 
+                 // Find product card based on name instead of exact price, since prices vary by platform
+                 var rawName = "${item['name']}".toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();
+                 var nameWords = rawName.split(' ').filter(w => w.length > 2);
+                 if (nameWords.length > 3) nameWords = nameWords.slice(0, 3);
+                 if (nameWords.length === 0) nameWords = rawName.split(' ').slice(0, 1);
+                 
+                 var allElements = Array.from(document.querySelectorAll('*')).filter(e => {
+                     if (!e.innerText) return false;
+                     var t = e.innerText.toLowerCase();
+                     // Must contain all significant words
+                     var hasName = nameWords.every(w => t.includes(w));
+                     if (!hasName) return false;
+                     // Must be an actionable card
+                     return t.includes('add') || t.includes('out of stock') || t.includes('currently unavailable') || t.match(/-\\s*\\d+\\s*\\+/);
+                 });
+                 
+                 // Sort by text length ascending to get the tightest container (the product card itself)
+                 allElements.sort((a, b) => a.innerText.length - b.innerText.length);
+                 var targetCard = allElements.length > 0 ? allElements[0] : null;
+                 
+                 if (!targetCard) return "waiting";
+
+                 var isOOS = targetCard.innerText.toLowerCase().includes('out of stock') || targetCard.innerText.toLowerCase().includes('currently unavailable');
+                 if (isOOS) return "out_of_stock";
+
+                 var hasQuantitySelector = targetCard.innerText.replace(/\\s+/g, '').match(/-\\d+\\+/);
+                 if (hasQuantitySelector) return "success";
+
+                 if (window._clickedAdd) {
+                     var cartBadge = document.querySelector('[data-testid="cart-badge"], nav a[href*="/cart"]');
+                     var currentCount = cartBadge ? parseInt(cartBadge.innerText.replace(/[^0-9]/g, '')) || 0 : 0;
+                     if (currentCount > window._initialCartCount) {
+                        window._addSuccess = true;
+                        return "success";
+                     }
+                     if (Date.now() - window._addClickTime > 3000) {
+                        window._addSuccess = true;
+                        return "success";
+                     }
+                     return "waiting_for_network";
+                 } else {
+                     var addBtns = Array.from(targetCard.querySelectorAll('button, div')).filter(e => {
+                        if (!e.innerText) return false;
+                        var t = e.innerText.trim().toLowerCase();
+                        return t === 'add';
+                     });
+                     
+                     if (addBtns.length > 0) {
+                         var btn = addBtns[addBtns.length - 1]; // Use the innermost element
+                         var cartBadge = document.querySelector('[data-testid="cart-badge"], nav a[href*="/cart"]');
+                         window._initialCartCount = cartBadge ? parseInt(cartBadge.innerText.replace(/[^0-9]/g, '')) || 0 : 0;
+                         
+                         var ev = {bubbles: true, cancelable: true, view: window};
+                         btn.dispatchEvent(new PointerEvent('pointerdown', ev));
+                         btn.dispatchEvent(new MouseEvent('mousedown', ev));
+                         btn.dispatchEvent(new PointerEvent('pointerup', ev));
+                         btn.dispatchEvent(new MouseEvent('mouseup', ev));
+                         btn.click();
+                         
+                         window._clickedAdd = true;
+                         window._addClickTime = Date.now();
+                         return "waiting_for_network";
+                     }
+                 }
+                 return "waiting";
+              })();
+            ''');
+            
+            if (status == "success") {
+              result = "success";
+              await Future.delayed(const Duration(seconds: 1));
+              break;
+            } else if (status == "out_of_stock") {
+              result = "Product Out of Stock";
+              break;
+            } else if (status == "timeout_after_click") {
+              result = "Click registered but cart did not update";
+              break;
+            }
+          } catch (e) {}
+        }
+        
+        if (result == null) {
+            String debugTxt = "";
+            try {
+               final text = await headlessWebView.webViewController?.evaluateJavascript(source: "document.body.innerText") as String?;
+               debugTxt = (text != null && text.length > 300) ? text.substring(0, 300).replaceAll('\\n', ' ') : (text ?? "empty");
+            } catch(e) {}
+            result = "timeout_snippet: Cannot find product or Add button. Page text: $debugTxt";
+        }
+
+        if (result == "success") {
+          addedCount++;
+        } else if (result == "out_of_stock") {
+          errors.add("${item['name']} failed: Product Out of Stock");
+        } else {
+          errors.add("${item['name']} failed: $result");
+        }
+      } catch (e) {
+        errors.add("${item['name']} failed: Crash during polling");
+      } finally {
+        headlessWebView.dispose();
+      }
+    }
+    return {'added': addedCount, 'errors': errors};
+  }
+
+  static Future<Map<String, dynamic>> syncBlinkit(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty) return {'added': 0, 'errors': []};
+    
+    int addedCount = 0;
+    List<String> errors = [];
+    
+    for (var item in items) {
+      HeadlessInAppWebView? headlessWebView;
+      final encodedQuery = Uri.encodeComponent(item['name']);
+      
+      headlessWebView = HeadlessInAppWebView(
+        initialUrlRequest: URLRequest(url: WebUri("https://blinkit.com/s/?q=$encodedQuery")),
+      );
+
+      await headlessWebView.run();
+      
+      try {
+        String? result;
+        for (int i = 0; i < 50; i++) {
+          await Future.delayed(const Duration(milliseconds: 600));
+          try {
+            final status = await headlessWebView.webViewController?.evaluateJavascript(source: '''
+              (function() {
+                 if (window._addSuccess) return "success";
+                 
+                 // Find product card based on name instead of exact price, since prices vary by platform
+                 var rawName = "${item['name']}".toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();
+                 var nameWords = rawName.split(' ').filter(w => w.length > 2);
+                 if (nameWords.length > 3) nameWords = nameWords.slice(0, 3);
+                 if (nameWords.length === 0) nameWords = rawName.split(' ').slice(0, 1);
+                 
+                 var allElements = Array.from(document.querySelectorAll('*')).filter(e => {
+                     if (!e.innerText) return false;
+                     var t = e.innerText.toLowerCase();
+                     // Must contain all significant words
+                     var hasName = nameWords.every(w => t.includes(w));
+                     if (!hasName) return false;
+                     // Must be an actionable card
+                     return t.includes('add') || t.includes('out of stock') || t.includes('currently unavailable') || t.match(/-\\s*\\d+\\s*\\+/);
+                 });
+                 
+                 // Sort by text length ascending to get the tightest container (the product card itself)
+                 allElements.sort((a, b) => a.innerText.length - b.innerText.length);
+                 var targetCard = allElements.length > 0 ? allElements[0] : null;
+                 
+                 if (!targetCard) return "waiting";
+
+                 var isOOS = targetCard.innerText.toLowerCase().includes('out of stock') || targetCard.innerText.toLowerCase().includes('currently unavailable');
+                 if (isOOS) return "out_of_stock";
+
+                 var hasQuantitySelector = targetCard.innerText.replace(/\\s+/g, '').match(/-\\d+\\+/);
+                 if (hasQuantitySelector) return "success";
+
+                 if (window._clickedAdd) {
+                     var cartBadge = document.querySelector('[class*="CartButton"], [class*="CartBadge"], nav a[href*="/cart"]');
+                     var currentCount = cartBadge ? parseInt(cartBadge.innerText.replace(/[^0-9]/g, '')) || 0 : 0;
+                     if (currentCount > window._initialCartCount) {
+                        window._addSuccess = true;
+                        return "success";
+                     }
+                     if (Date.now() - window._addClickTime > 3000) {
+                        window._addSuccess = true;
+                        return "success";
+                     }
+                     return "waiting_for_network";
+                 } else {
+                     var addBtns = Array.from(targetCard.querySelectorAll('div, button')).filter(e => {
+                        if (!e.innerText) return false;
+                        var t = e.innerText.trim().toLowerCase();
+                        return t === 'add';
+                     });
+                     
+                     if (addBtns.length > 0) {
+                         var btn = addBtns[addBtns.length - 1]; // Use the innermost element
+                         var cartBadge = document.querySelector('[class*="CartButton"], [class*="CartBadge"], nav a[href*="/cart"]');
+                         window._initialCartCount = cartBadge ? parseInt(cartBadge.innerText.replace(/[^0-9]/g, '')) || 0 : 0;
+                         
+                         var ev = {bubbles: true, cancelable: true, view: window};
+                         btn.dispatchEvent(new PointerEvent('pointerdown', ev));
+                         btn.dispatchEvent(new MouseEvent('mousedown', ev));
+                         btn.dispatchEvent(new PointerEvent('pointerup', ev));
+                         btn.dispatchEvent(new MouseEvent('mouseup', ev));
+                         btn.click();
+                         
+                         window._clickedAdd = true;
+                         window._addClickTime = Date.now();
+                         return "waiting_for_network";
+                     }
+                 }
+                 return "waiting";
+              })();
+            ''');
+            
+            if (status == "success") {
+              result = "success";
+              await Future.delayed(const Duration(seconds: 1));
+              break;
+            } else if (status == "out_of_stock") {
+              result = "Product Out of Stock";
+              break;
+            } else if (status == "timeout_after_click") {
+              result = "Click registered but cart did not update";
+              break;
+            }
+          } catch (e) {}
+        }
+        
+        if (result == null) {
+            String debugTxt = "";
+            try {
+               final text = await headlessWebView.webViewController?.evaluateJavascript(source: "document.body.innerText") as String?;
+               debugTxt = (text != null && text.length > 300) ? text.substring(0, 300).replaceAll('\\n', ' ') : (text ?? "empty");
+            } catch(e) {}
+            result = "timeout_snippet: Cannot find product or Add button. Page text: $debugTxt";
+        }
+
+        if (result == "success") {
+          addedCount++;
+        } else if (result == "out_of_stock") {
+          errors.add("${item['name']} failed: Product Out of Stock");
+        } else {
+          errors.add("${item['name']} failed: $result");
+        }
+      } catch (e) {
+        errors.add("${item['name']} failed: Crash during polling");
+      } finally {
+        headlessWebView.dispose();
+      }
+    }
+    return {'added': addedCount, 'errors': errors};
+  }
 }

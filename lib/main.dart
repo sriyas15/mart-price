@@ -1010,135 +1010,145 @@ class _CartScreenState extends State<CartScreen> {
   static const platformChannel = MethodChannel('mart_price/accessibility');
   final _storage = const FlutterSecureStorage();
   bool _isSyncing = false;
-
+  String? _syncingPlatform;
+  
   Future<void> _triggerAutoCart(String platformName, List<CartItem> items) async {
-    // If it's BigBasket, try the backend API first
-    if (platformName == 'BigBasket') {
-      final linkedStr = await _storage.read(key: 'bigbasket_linked');
-      if (linkedStr == 'true') {
-        // We have linked accounts! Use Headless WebView API!
-        if (!mounted) return;
-        setState(() => _isSyncing = true);
-        
-        try {
-          final itemList = items.map((i) => {
-            'id': i.product.id,
-            'name': i.product.name,
-            'price': i.product.price,
-            'quantity': i.quantity
-          }).toList();
+    final linkedKey = platformName == 'BigBasket' ? 'bigbasket_linked' : 
+                      platformName == 'Zepto' ? 'zepto_linked' : 'blinkit_linked';
+    final checkoutUrl = platformName == 'BigBasket' ? 'https://www.bigbasket.com/basket/' :
+                        platformName == 'Zepto' ? 'https://www.zeptonow.com/' : 'https://blinkit.com/';
+                        
+    final linkedStr = await _storage.read(key: linkedKey);
+    
+    if (linkedStr == 'true') {
+      if (!mounted) return;
+      setState(() {
+        _isSyncing = true;
+        _syncingPlatform = platformName;
+      });
+      
+      try {
+        final itemList = items.map((i) => {
+          'id': i.product.id,
+          'name': i.product.name,
+          'price': i.product.price,
+          'quantity': i.quantity
+        }).toList();
 
-          final result = await CartSyncService.syncBigBasket(itemList);
+        Map<String, dynamic> result;
+        if (platformName == 'BigBasket') {
+          result = await CartSyncService.syncBigBasket(itemList);
+        } else if (platformName == 'Zepto') {
+          result = await CartSyncService.syncZepto(itemList);
+        } else {
+          result = await CartSyncService.syncBlinkit(itemList);
+        }
 
-          if ((result['errors'] as List).isEmpty) {
-            if (!mounted) return;
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Successfully synced ${result['added']} items to BigBasket via WebView!')),
-            );
-            // Open a visible InAppWebView so the user can see the cart with the same cookies
-            Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
-              appBar: AppBar(title: const Text('BigBasket Checkout')),
-              body: InAppWebView(
-                initialUrlRequest: URLRequest(url: WebUri('https://www.bigbasket.com/basket/')),
-                initialSettings: InAppWebViewSettings(
-                  useShouldOverrideUrlLoading: true,
-                ),
-                shouldOverrideUrlLoading: (controller, navigationAction) async {
-                  var uri = navigationAction.request.url!;
-                  if (!["http", "https", "file", "chrome", "data", "javascript", "about"].contains(uri.scheme)) {
-                    return NavigationActionPolicy.CANCEL;
-                  }
-                  return NavigationActionPolicy.ALLOW;
-                },
-              ),
-            )));
-          } else {
-            if (!mounted) return;
-            showDialog(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: const Text('Sync Errors'),
-                content: SizedBox(
-                  width: double.maxFinite,
-                  child: SingleChildScrollView(
-                    child: SelectableText(result['errors'].join('\n\n')),
-                  ),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Close'),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      Navigator.pop(context); // Close dialog
-                      // Open visible InAppWebView
-                      Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
-                        appBar: AppBar(title: const Text('BigBasket Checkout')),
-                        body: InAppWebView(
-                          initialUrlRequest: URLRequest(url: WebUri('https://www.bigbasket.com/basket/')),
-                          initialSettings: InAppWebViewSettings(
-                            useShouldOverrideUrlLoading: true,
-                          ),
-                          shouldOverrideUrlLoading: (controller, navigationAction) async {
-                            var uri = navigationAction.request.url!;
-                            if (!["http", "https", "file", "chrome", "data", "javascript", "about"].contains(uri.scheme)) {
-                              return NavigationActionPolicy.CANCEL;
-                            }
-                            return NavigationActionPolicy.ALLOW;
-                          },
-                        ),
-                      )));
-                    },
-                    child: const Text('Continue to Checkout', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ),
-                ],
-              ),
-            );
-          }
-        } catch (e) {
+        if ((result['errors'] as List).isEmpty) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error during sync: $e')),
+            SnackBar(content: Text("Successfully synced ${result['added']} items to $platformName via WebView!")),
           );
-        } finally {
-          if (mounted) setState(() => _isSyncing = false);
+          Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
+            appBar: AppBar(title: Text('$platformName Checkout')),
+            body: InAppWebView(
+              initialUrlRequest: URLRequest(url: WebUri(checkoutUrl)),
+              initialSettings: InAppWebViewSettings(
+                useShouldOverrideUrlLoading: true,
+              ),
+              shouldOverrideUrlLoading: (controller, navigationAction) async {
+                var uri = navigationAction.request.url!;
+                if (!["http", "https", "file", "chrome", "data", "javascript", "about"].contains(uri.scheme)) {
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
+            ),
+          )));
+        } else {
+          if (!mounted) return;
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Sync Errors'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: SelectableText(result['errors'].join('\n\n')),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context); // Close dialog
+                    // Open visible InAppWebView
+                    Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
+                      appBar: AppBar(title: Text('\$platformName Checkout')),
+                      body: InAppWebView(
+                        initialUrlRequest: URLRequest(url: WebUri(checkoutUrl)),
+                        initialSettings: InAppWebViewSettings(
+                          useShouldOverrideUrlLoading: true,
+                        ),
+                        shouldOverrideUrlLoading: (controller, navigationAction) async {
+                          var uri = navigationAction.request.url!;
+                          if (!["http", "https", "file", "chrome", "data", "javascript", "about"].contains(uri.scheme)) {
+                            return NavigationActionPolicy.CANCEL;
+                          }
+                          return NavigationActionPolicy.ALLOW;
+                        },
+                      ),
+                    )));
+                  },
+                  child: const Text('Continue to Checkout', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          );
         }
-        return; // Don't run accessibility service
-      } else {
-        // Not linked, prompt them
+      } catch (e) {
         if (!mounted) return;
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Connect Account'),
-            content: const Text('For instant background syncing, please link your BigBasket account.'),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                  _runAccessibilityFallback(platformName, items); // Fallback to old method
-                },
-                child: const Text('Use old method'),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => const LinkAccountsScreen()),
-                  );
-                },
-                child: const Text('Link Account'),
-              ),
-            ],
-          ),
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error during sync: \$e')),
         );
-        return;
+      } finally {
+        if (mounted) setState(() {
+          _isSyncing = false;
+          _syncingPlatform = null;
+        });
       }
     } else {
-      // Zepto and Blinkit fallback to old method for now
-      _runAccessibilityFallback(platformName, items);
+      // Not linked, prompt them
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Connect \$platformName Account'),
+          content: Text('For instant background syncing, please link your \$platformName account.'),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _runAccessibilityFallback(platformName, items); // Fallback to old method
+              },
+              child: const Text('Use old method'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const LinkAccountsScreen()),
+                );
+              },
+              child: const Text('Link Account'),
+            ),
+          ],
+        ),
+      );
     }
   }
 
@@ -1426,11 +1436,11 @@ class _CartScreenState extends State<CartScreen> {
                     height: 44,
                     child: ElevatedButton.icon(
                       onPressed: _isSyncing ? null : () => _triggerAutoCart(platform, items),
-                      icon: _isSyncing && platform == 'BigBasket'
+                      icon: _isSyncing && _syncingPlatform == platform
                           ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                           : const Icon(Icons.auto_awesome, size: 18),
                       label: Text(
-                        _isSyncing && platform == 'BigBasket' ? 'Syncing...' : 'Auto-Fill Cart',
+                        _isSyncing && _syncingPlatform == platform ? 'Syncing...' : 'Auto-Fill Cart',
                         style: const TextStyle(
                             fontSize: 14, fontWeight: FontWeight.w600),
                       ),
