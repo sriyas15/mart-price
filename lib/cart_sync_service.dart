@@ -3,7 +3,30 @@ import 'dart:convert';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 class CartSyncService {
-  static Future<Map<String, dynamic>> syncBigBasket(List<Map<String, dynamic>> items) async {
+  // Helper: Inject location cookies before headless WebView navigation
+  static Future<void> _injectLocationCookies(String platform, double lat, double lon, String postalCode) async {
+    final cookieManager = CookieManager.instance();
+    
+    if (platform == 'BigBasket') {
+      await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: 'bb_lat', value: lat.toString());
+      await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: 'bb_lng', value: lon.toString());
+      await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: '_bb_locSrc', value: 'session');
+      if (postalCode.isNotEmpty) {
+        await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: 'pincode', value: postalCode);
+      }
+    } else if (platform == 'Blinkit') {
+      await cookieManager.setCookie(url: WebUri('https://blinkit.com'), name: 'gr_1_lat', value: lat.toString());
+      await cookieManager.setCookie(url: WebUri('https://blinkit.com'), name: 'gr_1_lon', value: lon.toString());
+      if (postalCode.isNotEmpty) {
+        await cookieManager.setCookie(url: WebUri('https://blinkit.com'), name: 'gr_1_locality', value: postalCode);
+      }
+    } else if (platform == 'Zepto') {
+      await cookieManager.setCookie(url: WebUri('https://www.zeptonow.com'), name: 'user_lat', value: lat.toString());
+      await cookieManager.setCookie(url: WebUri('https://www.zeptonow.com'), name: 'user_lon', value: lon.toString());
+    }
+  }
+
+  static Future<Map<String, dynamic>> syncBigBasket(List<Map<String, dynamic>> items, double lat, double lon, String postalCode) async {
     final completer = Completer<Map<String, dynamic>>();
     
     if (items.isEmpty) {
@@ -21,6 +44,9 @@ class CartSyncService {
     
     for (var item in validItems) {
       HeadlessInAppWebView? headlessWebView;
+      
+      // Inject location cookies before navigating (Method 5)
+      await _injectLocationCookies('BigBasket', lat, lon, postalCode);
       
       headlessWebView = HeadlessInAppWebView(
         initialUrlRequest: URLRequest(url: WebUri("https://www.bigbasket.com/pd/${item['id']}/")),
@@ -157,7 +183,7 @@ class CartSyncService {
     return {'added': addedCount, 'errors': errors};
   }
 
-  static Future<Map<String, dynamic>> syncZepto(List<Map<String, dynamic>> items) async {
+  static Future<Map<String, dynamic>> syncZepto(List<Map<String, dynamic>> items, double lat, double lon, String postalCode) async {
     if (items.isEmpty) return {'added': 0, 'errors': []};
     
     int addedCount = 0;
@@ -166,6 +192,9 @@ class CartSyncService {
     for (var item in items) {
       HeadlessInAppWebView? headlessWebView;
       final encodedQuery = Uri.encodeComponent(item['name']);
+      
+      // Inject location cookies before navigating (Method 5)
+      await _injectLocationCookies('Zepto', lat, lon, postalCode);
       
       headlessWebView = HeadlessInAppWebView(
         initialUrlRequest: URLRequest(url: WebUri("https://www.zeptonow.com/search?query=$encodedQuery")),
@@ -289,7 +318,7 @@ class CartSyncService {
     return {'added': addedCount, 'errors': errors};
   }
 
-  static Future<Map<String, dynamic>> syncBlinkit(List<Map<String, dynamic>> items) async {
+  static Future<Map<String, dynamic>> syncBlinkit(List<Map<String, dynamic>> items, double lat, double lon, String postalCode) async {
     if (items.isEmpty) return {'added': 0, 'errors': []};
     
     int addedCount = 0;
@@ -298,6 +327,9 @@ class CartSyncService {
     for (var item in items) {
       HeadlessInAppWebView? headlessWebView;
       final encodedQuery = Uri.encodeComponent(item['name']);
+      
+      // Inject location cookies before navigating (Method 5)
+      await _injectLocationCookies('Blinkit', lat, lon, postalCode);
       
       headlessWebView = HeadlessInAppWebView(
         initialUrlRequest: URLRequest(url: WebUri("https://blinkit.com/s/?q=$encodedQuery")),

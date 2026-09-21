@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -156,6 +157,13 @@ class _HomeScreenState extends State<HomeScreen> {
   String _locationLabel = 'T. Nagar';
   bool _gpsActive = false;
 
+  // Address state (from reverse geocoding)
+  String _street = '';
+  String _subLocality = '';   // neighborhood (e.g., "T. Nagar")
+  String _locality = '';      // city (e.g., "Chennai")
+  String _postalCode = '';    // pincode (e.g., "600017")
+  String _fullAddress = '';   // complete formatted address
+
   // Search state
   final TextEditingController _searchCtrl = TextEditingController();
   List<String> _suggestions = [];
@@ -221,14 +229,40 @@ class _HomeScreenState extends State<HomeScreen> {
           timeLimit: Duration(seconds: 10),
         ),
       );
+
+      // Reverse geocode to get real address
+      String addressLabel = 'GPS (${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)})';
+      try {
+        List<Placemark> placemarks = await placemarkFromCoordinates(
+          position.latitude, position.longitude,
+        );
+        if (placemarks.isNotEmpty) {
+          final place = placemarks.first;
+          _street = place.street ?? '';
+          _subLocality = place.subLocality ?? '';
+          _locality = place.locality ?? '';
+          _postalCode = place.postalCode ?? '';
+          _fullAddress = [
+            _street,
+            _subLocality,
+            _locality,
+            _postalCode,
+          ].where((s) => s.isNotEmpty).join(', ');
+          addressLabel = _subLocality.isNotEmpty
+              ? '$_subLocality, $_locality - $_postalCode'
+              : _fullAddress;
+        }
+      } catch (e) {
+        // Reverse geocoding failed, use raw coordinates as fallback
+      }
+
       setState(() {
         _lat = position.latitude;
         _lon = position.longitude;
-        _locationLabel =
-            'GPS (${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)})';
+        _locationLabel = addressLabel;
         _gpsActive = true;
       });
-      _showSuccess('Location detected via GPS!');
+      _showSuccess('Location detected: $_locationLabel');
     } catch (e) {
       _showError('GPS detection failed. Select an area manually.');
     }
@@ -286,7 +320,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       final uri = Uri.parse(
-        '$_backendBase/compare?query=${Uri.encodeComponent(query)}&lat=$_lat&lon=$_lon',
+        '$_backendBase/compare?query=${Uri.encodeComponent(query)}&lat=$_lat&lon=$_lon&pincode=$_postalCode',
       );
       final response =
           await http.get(uri).timeout(const Duration(seconds: 60));
@@ -471,6 +505,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       onRemove: _removeFromCart,
                       onClear: _clearCart,
                       onOpenApp: _openMartApp,
+                      lat: _lat,
+                      lon: _lon,
+                      postalCode: _postalCode,
                     ),
                   ),
                 );
@@ -993,6 +1030,9 @@ class CartScreen extends StatefulWidget {
   final void Function(String platform, int index) onRemove;
   final VoidCallback onClear;
   final Future<void> Function(String url, String platform) onOpenApp;
+  final double lat;
+  final double lon;
+  final String postalCode;
 
   const CartScreen({
     super.key,
@@ -1000,6 +1040,9 @@ class CartScreen extends StatefulWidget {
     required this.onRemove,
     required this.onClear,
     required this.onOpenApp,
+    required this.lat,
+    required this.lon,
+    required this.postalCode,
   });
 
   @override
@@ -1011,6 +1054,30 @@ class _CartScreenState extends State<CartScreen> {
   final _storage = const FlutterSecureStorage();
   bool _isSyncing = false;
   String? _syncingPlatform;
+
+  // Helper: Inject location cookies into InAppWebView CookieManager
+  Future<void> _injectLocationCookies(String platformName, double lat, double lon, String postalCode) async {
+    final cookieManager = CookieManager.instance();
+    
+    if (platformName == 'Blinkit') {
+      await cookieManager.setCookie(url: WebUri('https://blinkit.com'), name: 'gr_1_lat', value: lat.toString());
+      await cookieManager.setCookie(url: WebUri('https://blinkit.com'), name: 'gr_1_lon', value: lon.toString());
+      if (postalCode.isNotEmpty) {
+        await cookieManager.setCookie(url: WebUri('https://blinkit.com'), name: 'gr_1_locality', value: postalCode);
+      }
+    } else if (platformName == 'Zepto') {
+      // Zepto uses server-side session; set geolocation via WebView JS
+      await cookieManager.setCookie(url: WebUri('https://www.zeptonow.com'), name: 'user_lat', value: lat.toString());
+      await cookieManager.setCookie(url: WebUri('https://www.zeptonow.com'), name: 'user_lon', value: lon.toString());
+    } else if (platformName == 'BigBasket') {
+      await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: 'bb_lat', value: lat.toString());
+      await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: 'bb_lng', value: lon.toString());
+      await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: '_bb_locSrc', value: 'session');
+      if (postalCode.isNotEmpty) {
+        await cookieManager.setCookie(url: WebUri('https://www.bigbasket.com'), name: 'pincode', value: postalCode);
+      }
+    }
+  }
   
   Future<void> _triggerAutoCart(String platformName, List<CartItem> items) async {
     final linkedKey = platformName == 'BigBasket' ? 'bigbasket_linked' : 
@@ -1037,11 +1104,11 @@ class _CartScreenState extends State<CartScreen> {
 
         Map<String, dynamic> result;
         if (platformName == 'BigBasket') {
-          result = await CartSyncService.syncBigBasket(itemList);
+          result = await CartSyncService.syncBigBasket(itemList, widget.lat, widget.lon, widget.postalCode);
         } else if (platformName == 'Zepto') {
-          result = await CartSyncService.syncZepto(itemList);
+          result = await CartSyncService.syncZepto(itemList, widget.lat, widget.lon, widget.postalCode);
         } else {
-          result = await CartSyncService.syncBlinkit(itemList);
+          result = await CartSyncService.syncBlinkit(itemList, widget.lat, widget.lon, widget.postalCode);
         }
 
         if ((result['errors'] as List).isEmpty) {
@@ -1049,6 +1116,8 @@ class _CartScreenState extends State<CartScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Successfully synced ${result['added']} items to $platformName via WebView!")),
           );
+          // Inject location cookies before opening checkout WebView (Method 5)
+          await _injectLocationCookies(platformName, widget.lat, widget.lon, widget.postalCode);
           Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
             appBar: AppBar(title: Text('$platformName Checkout')),
             body: InAppWebView(
@@ -1083,8 +1152,10 @@ class _CartScreenState extends State<CartScreen> {
                   child: const Text('Close'),
                 ),
                 TextButton(
-                  onPressed: () {
+                  onPressed: () async {
                     Navigator.pop(context); // Close dialog
+                    // Inject location cookies before checkout
+                    await _injectLocationCookies(platformName, widget.lat, widget.lon, widget.postalCode);
                     // Open visible InAppWebView
                     Navigator.push(context, MaterialPageRoute(builder: (context) => Scaffold(
                       appBar: AppBar(title: Text('\$platformName Checkout')),

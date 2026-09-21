@@ -108,7 +108,9 @@ app.get('/api/suggestions', (req, res) => {
 // 2. Multi-Product Comparison Endpoint (grouped by platform)
 // ---------------------------------------------------------------------------
 app.get('/api/compare', async (req, res) => {
-  const { query, lat = '13.0418', lon = '80.2341' } = req.query;
+  const { query, lat = '13.0418', lon = '80.2341', pincode = '' } = req.query;
+
+  console.log(`\n🔍 Search: "${query}" | Location: ${lat}, ${lon} | Pincode: ${pincode || 'N/A'}`);
 
   if (!query || query.trim() === '') {
     return res.status(400).json({
@@ -127,7 +129,7 @@ app.get('/api/compare', async (req, res) => {
       await new Promise(r => setTimeout(r, index * 2500));
       const config = PLATFORM_CONFIG[platform];
       try {
-        const products = await scraper[config.scraper](query);
+        const products = await scraper[config.scraper](query, lat, lon, pincode);
         if (products && products.length > 0) {
           results[platform] = products.map((p) => ({
             id: p.id,

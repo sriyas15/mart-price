@@ -43,10 +43,20 @@ async function retryEvaluate(page, evalFn, retries = 6) {
 // ---------------------------------------------------------------------------
 // Blinkit Scraper — API Interception (Bypasses lazy loading completely)
 // ---------------------------------------------------------------------------
-async function scrapeBlinkit(query) {
+async function scrapeBlinkit(query, lat, lon, pincode) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
+    // Inject location cookies BEFORE navigating (Method 5: Cookie Injection)
+    if (lat && lon) {
+      await page.setCookie(
+        { name: 'gr_1_lat', value: String(lat), domain: '.blinkit.com', path: '/' },
+        { name: 'gr_1_lon', value: String(lon), domain: '.blinkit.com', path: '/' },
+        { name: 'gr_1_locality', value: pincode || '', domain: '.blinkit.com', path: '/' }
+      );
+      console.log(`  [Blinkit] Location injected: ${lat}, ${lon} (pincode: ${pincode || 'N/A'})`);
+    }
+
     let apiData = null;
     page.on('response', async res => {
       const url = res.url();
@@ -108,10 +118,18 @@ async function scrapeBlinkit(query) {
 // ---------------------------------------------------------------------------
 // Zepto Scraper — site-specific card extraction using <a> link cards
 // ---------------------------------------------------------------------------
-async function scrapeZepto(query) {
+async function scrapeZepto(query, lat, lon, pincode) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
+    // Inject location via Geolocation API override (Method 5: Geolocation Spoofing)
+    if (lat && lon) {
+      const context = browser.defaultBrowserContext();
+      await context.overridePermissions('https://www.zeptonow.com', ['geolocation']);
+      await page.setGeolocation({ latitude: parseFloat(lat), longitude: parseFloat(lon) });
+      console.log(`  [Zepto] Geolocation set: ${lat}, ${lon}`);
+    }
+
     await page.goto(`https://www.zeptonow.com/search?query=${encodeURIComponent(query)}`, { waitUntil: 'networkidle2', timeout: 30000 });
 
     const data = await retryEvaluate(page, () => {
@@ -182,10 +200,24 @@ async function scrapeZepto(query) {
 // ---------------------------------------------------------------------------
 // BigBasket Scraper — using internal JSON Web API (Option 1)
 // ---------------------------------------------------------------------------
-async function scrapeBigBasket(query) {
+async function scrapeBigBasket(query, lat, lon, pincode) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
+    // Inject location cookies BEFORE navigating (Method 5: Cookie Injection)
+    if (lat && lon) {
+      const cookiesToSet = [
+        { name: 'bb_lat', value: String(lat), domain: '.bigbasket.com', path: '/' },
+        { name: 'bb_lng', value: String(lon), domain: '.bigbasket.com', path: '/' },
+        { name: '_bb_locSrc', value: 'session', domain: '.bigbasket.com', path: '/' },
+      ];
+      if (pincode) {
+        cookiesToSet.push({ name: 'pincode', value: String(pincode), domain: '.bigbasket.com', path: '/' });
+      }
+      await page.setCookie(...cookiesToSet);
+      console.log(`  [BigBasket] Location injected: ${lat}, ${lon} (pincode: ${pincode || 'N/A'})`);
+    }
+
     // Navigate to homepage first to get Akamai cookies and clear Cloudflare
     await page.goto('https://www.bigbasket.com/', { waitUntil: 'domcontentloaded', timeout: 20000 });
 
