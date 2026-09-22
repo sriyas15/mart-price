@@ -183,6 +183,28 @@ class CartSyncService {
     return {'added': addedCount, 'errors': errors};
   }
 
+  // Helper: Extract 2-3 key words from a product name for Zepto search.
+  // Zepto's URL search breaks with long/complex names (returns empty results).
+  static String _simplifyZeptoQuery(String fullName) {
+    // Remove everything after | and parenthesized text
+    String cleaned = fullName
+        .replaceAll(RegExp(r'\|.*$'), '')
+        .replaceAll(RegExp(r'\(.*?\)'), '')
+        .replaceAll(RegExp(r'[^a-zA-Z0-9 ]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    
+    // Filter out generic/filler words
+    const fillers = {'pack', 'pouch', 'bottle', 'box', 'can', 'pcs', 'pc', 'gm', 'kg', 'ml', 'ltr', 'g', 'l', 'the', 'of', 'and', 'with', 'for', 'in', 'a', 'an', 'bar', 'sachet'};
+    List<String> words = cleaned.split(' ')
+        .where((w) => w.length > 1 && !fillers.contains(w.toLowerCase()))
+        .toList();
+    
+    // Take first 3 significant words
+    if (words.length > 3) words = words.sublist(0, 3);
+    return words.join(' ');
+  }
+
   static Future<Map<String, dynamic>> syncZepto(List<Map<String, dynamic>> items, double lat, double lon, String postalCode) async {
     if (items.isEmpty) return {'added': 0, 'errors': []};
     
@@ -191,9 +213,11 @@ class CartSyncService {
     
     for (var item in items) {
       HeadlessInAppWebView? headlessWebView;
-      final encodedQuery = Uri.encodeComponent(item['name']);
+      // Use simplified query — Zepto's URL search breaks with long/complex product names
+      final shortQuery = CartSyncService._simplifyZeptoQuery(item['name']);
+      final encodedQuery = Uri.encodeComponent(shortQuery);
       
-      // Inject location cookies before navigating (Method 5)
+      // Inject location cookies before navigating
       await _injectLocationCookies('Zepto', lat, lon, postalCode);
       
       headlessWebView = HeadlessInAppWebView(
@@ -210,6 +234,19 @@ class CartSyncService {
             final status = await headlessWebView.webViewController?.evaluateJavascript(source: '''
               (function() {
                  if (window._addSuccess) return "success";
+                 
+                 // If autocomplete suggestions appeared instead of results, click "Show all results"
+                 if (!window._clickedShowAll) {
+                    var suggestions = Array.from(document.querySelectorAll('[role="option"], [role="listbox"] > *'));
+                    var showAll = suggestions.find(function(el) { 
+                       return el.innerText && el.innerText.toLowerCase().includes('show all results'); 
+                    });
+                    if (showAll) {
+                       showAll.click();
+                       window._clickedShowAll = true;
+                       return "waiting";
+                    }
+                 }
                  
                  // Find product card based on name instead of exact price, since prices vary by platform
                  var rawName = "${item['name']}".toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();
