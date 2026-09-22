@@ -47,14 +47,24 @@ async function scrapeBlinkit(query, lat, lon, pincode) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
-    // Inject location cookies BEFORE navigating (Method 5: Cookie Injection)
+    // METHOD A++: LocalStorage + Cookie Injection
     if (lat && lon) {
       await page.setCookie(
         { name: 'gr_1_lat', value: String(lat), domain: '.blinkit.com', path: '/' },
         { name: 'gr_1_lon', value: String(lon), domain: '.blinkit.com', path: '/' },
         { name: 'gr_1_locality', value: pincode || '', domain: '.blinkit.com', path: '/' }
       );
-      console.log(`  [Blinkit] Location injected: ${lat}, ${lon} (pincode: ${pincode || 'N/A'})`);
+      
+      await page.evaluateOnNewDocument((lat, lon, pincode) => {
+         localStorage.setItem('location_obj', JSON.stringify({
+             lat: parseFloat(lat),
+             lon: parseFloat(lon),
+             pincode: pincode || '',
+             city: "Chennai"
+         }));
+      }, lat, lon, pincode);
+      
+      console.log(`  [Blinkit] Location injected (Cookie + LS): ${lat}, ${lon} (pincode: ${pincode || 'N/A'})`);
     }
 
     let apiData = null;
@@ -72,7 +82,7 @@ async function scrapeBlinkit(query, lat, lon, pincode) {
     if (apiData && apiData.response && apiData.response.snippets) {
       const products = [];
       const seen = new Set();
-      
+
       for (const snippet of apiData.response.snippets) {
         if (snippet.widget_type === 'product_card_snippet_type_2' || snippet.widget_type === 'product_card_snippet') {
           const d = snippet.data;
@@ -105,7 +115,7 @@ async function scrapeBlinkit(query, lat, lon, pincode) {
       }
       return products.length > 0 ? products : null;
     }
-    
+
     return null;
   } catch (e) {
     console.error('Blinkit API scrape error:', e.message);
@@ -122,12 +132,19 @@ async function scrapeZepto(query, lat, lon, pincode) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
-    // Inject location via Geolocation API override (Method 5: Geolocation Spoofing)
+    // METHOD A++: LocalStorage + Geolocation Injection
     if (lat && lon) {
       const context = browser.defaultBrowserContext();
       await context.overridePermissions('https://www.zeptonow.com', ['geolocation']);
       await page.setGeolocation({ latitude: parseFloat(lat), longitude: parseFloat(lon) });
-      console.log(`  [Zepto] Geolocation set: ${lat}, ${lon}`);
+      
+      await page.evaluateOnNewDocument((lat, lon) => {
+        localStorage.setItem('user_lat', lat);
+        localStorage.setItem('user_lon', lon);
+        localStorage.setItem('is_location_set', 'true');
+      }, lat, lon);
+      
+      console.log(`  [Zepto] Location injected (LS + Geo): ${lat}, ${lon}`);
     }
 
     await page.goto(`https://www.zeptonow.com/search?query=${encodeURIComponent(query)}`, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -204,18 +221,32 @@ async function scrapeBigBasket(query, lat, lon, pincode) {
   if (!browser) return null;
   const page = await browser.newPage();
   try {
-    // Inject location cookies BEFORE navigating (Method 5: Cookie Injection)
+    // METHOD A++: Cookie + LocalStorage Injection
     if (lat && lon) {
+      // Determine city_id (1 = Bangalore, 2 = Chennai, etc.) - simple heuristic for now
+      const cityId = (lon > 79 && lon < 81) ? 2 : 1; 
+      
       const cookiesToSet = [
         { name: 'bb_lat', value: String(lat), domain: '.bigbasket.com', path: '/' },
         { name: 'bb_lng', value: String(lon), domain: '.bigbasket.com', path: '/' },
         { name: '_bb_locSrc', value: 'session', domain: '.bigbasket.com', path: '/' },
+        { name: '_bb_cid', value: String(cityId), domain: '.bigbasket.com', path: '/' },
       ];
       if (pincode) {
         cookiesToSet.push({ name: 'pincode', value: String(pincode), domain: '.bigbasket.com', path: '/' });
       }
       await page.setCookie(...cookiesToSet);
-      console.log(`  [BigBasket] Location injected: ${lat}, ${lon} (pincode: ${pincode || 'N/A'})`);
+      
+      await page.evaluateOnNewDocument((lat, lon, pincode, cityId) => {
+        localStorage.setItem('current_address', JSON.stringify({
+          lat: lat,
+          lng: lon,
+          pincode: pincode || '',
+          city_id: cityId
+        }));
+      }, lat, lon, pincode, cityId);
+      
+      console.log(`  [BigBasket] Location injected (Cookie + LS): ${lat}, ${lon} (pincode: ${pincode || 'N/A'})`);
     }
 
     // Navigate to homepage first to get Akamai cookies and clear Cloudflare
@@ -227,11 +258,11 @@ async function scrapeBigBasket(query, lat, lon, pincode) {
         const url = `https://www.bigbasket.com/listing-svc/v2/products?type=ps&slug=${encodeURIComponent(searchQuery)}&page=1`;
         const r = await fetch(url);
         const j = await r.json();
-        
+
         if (!j || !j.tabs || !j.tabs[0] || !j.tabs[0].product_info || !j.tabs[0].product_info.products) {
           return null;
         }
-        
+
         const rawProducts = j.tabs[0].product_info.products.slice(0, 40);
         return rawProducts.map(p => ({
           id: p.id,
